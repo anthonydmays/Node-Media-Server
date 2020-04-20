@@ -9,11 +9,15 @@ function getStreams(req, res, next) {
   let stats = {};
 
   this.sessions.forEach(function (session, id) {
-    if (session.constructor.name !== 'NodeRelaySession') {
+    if (session.TAG !== 'relay') {
       return;
     }
 
-    let {app, name} = session.conf;
+    let regRes = /\/(.*)\/(.*)/gi.exec(session.streamPath);
+
+    if (regRes === null) return;
+
+    let [app, name] = _.slice(regRes, 1);
 
     if (!_.get(stats, [app, name])) {
       _.set(stats, [app, name], {
@@ -21,7 +25,9 @@ function getStreams(req, res, next) {
       });
     }
 
-    _.set(stats, [app, name, 'relays'], {
+    const relays = _.get(stats, [app, name, 'relays']);
+
+    relays.push({
       app: app,
       name: name,
       url: session.conf.ouPath,
@@ -57,8 +63,20 @@ function pushStream(req, res, next) {
   }
 }
 
+function stopRelay(req, res, next) {
+  let id = req.params.id;
+  const session = this.sessions.get(id);
+  if (!session || session.TAG !== 'relay') {
+    res.sendStatus(404);
+  } else {
+    this.nodeEvent.emit('relayStop', id);
+    res.sendStatus(200);
+  }
+}
+
 module.exports = {
   getStreams,
   pullStream,
-  pushStream
+  pushStream,
+  stopRelay
 };
