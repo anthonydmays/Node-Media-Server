@@ -13,6 +13,10 @@ function getStreams(req, res, next) {
       return;
     }
 
+    let regRes = /\/(.*)\/(.*)/gi.exec(session.streamPath);
+
+    if (regRes === null) return;
+
     let { app, name } = session.conf;
 
     if (!_.get(stats, [app, name])) {
