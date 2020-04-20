@@ -18,6 +18,7 @@ class NodeRelayServer {
     this.staticCycle = null;
     this.staticSessions = new Map();
     this.dynamicSessions = new Map();
+    this.sessionsByStream = new Map();
   }
 
   async run() {
@@ -36,6 +37,7 @@ class NodeRelayServer {
     }
     context.nodeEvent.on('relayPull', this.onRelayPull.bind(this));
     context.nodeEvent.on('relayPush', this.onRelayPush.bind(this));
+    context.nodeEvent.on('relayStop', this.onRelayStop.bind(this));
     context.nodeEvent.on('prePlay', this.onPrePlay.bind(this));
     context.nodeEvent.on('donePlay', this.onDonePlay.bind(this));
     context.nodeEvent.on('postPublish', this.onPostPublish.bind(this));
@@ -81,16 +83,11 @@ class NodeRelayServer {
     conf.name = name;
     conf.ffmpeg = this.config.relay.ffmpeg;
     conf.inPath = url;
-    conf.ouPath = `rtmp://127.0.0.1:${this.config.rtmp.port}/${app}/${name}`;
-    let session = new NodeRelaySession(conf);
-    const id = session.id;
-    context.sessions.set(id, session);
-    session.on('end', (id) => {
-      this.dynamicSessions.delete(id);
-    });
-    this.dynamicSessions.set(id, session);
+    const streamPath = `/${app}/${name}`;
+    conf.ouPath = `rtmp://127.0.0.1:${this.config.rtmp.port}${streamPath}`;
+    const session = this.configureDynamicSession(conf, streamPath);
     session.run();
-    Logger.log('[Relay dynamic pull] start', id, conf.inPath, ' to ', conf.ouPath);
+    Logger.log('[Relay dynamic pull] start', session.id, conf.inPath, ' to ', conf.ouPath);
     return id;
   }
 
@@ -100,20 +97,22 @@ class NodeRelayServer {
     conf.app = app;
     conf.name = name;
     conf.ffmpeg = this.config.relay.ffmpeg;
-    conf.inPath = `rtmp://127.0.0.1:${this.config.rtmp.port}/${app}/${name}`;
+    const streamPath = `/${app}/${name}`;
+    conf.inPath = `rtmp://127.0.0.1:${this.config.rtmp.port}${streamPath}`;
     conf.ouPath = url;
-    let session = new NodeRelaySession(conf);
-    const id = session.id;
-    context.sessions.set(id, session);
-    session.on('end', (id) => {
-      this.dynamicSessions.delete(id);
-    });
-    this.dynamicSessions.set(id, session);
+    const session = this.configureDynamicSession(conf, streamPath);
     session.run();
-    Logger.log('[Relay dynamic push] start', id, conf.inPath, ' to ', conf.ouPath);
+    Logger.log('[Relay dynamic push] start', session.id, conf.inPath, ' to ', conf.ouPath);
   }
 
-  onPrePlay(id, streamPath, args) {
+  onRelayStop(id) {
+    const session = this.dynamicSessions.get(id);
+    if (session) {
+      session.end();
+    }
+  }
+
+  onPrePlay(streamId, streamPath, args) {
     if (!this.config.relay.tasks) {
       return;
     }
@@ -128,27 +127,24 @@ class NodeRelayServer {
         conf.ffmpeg = this.config.relay.ffmpeg;
         conf.inPath = hasApp ? `${conf.edge}/${stream}` : `${conf.edge}${streamPath}`;
         conf.ouPath = `rtmp://127.0.0.1:${this.config.rtmp.port}${streamPath}`;
-        let session = new NodeRelaySession(conf);
-        session.id = id;
-        session.on('end', (id) => {
-          this.dynamicSessions.delete(id);
-        });
-        this.dynamicSessions.set(id, session);
+        const session = this.configureDynamicSession(conf, streamPath, streamId);
         session.run();
-        Logger.log('[Relay dynamic pull] start', id, conf.inPath, ' to ', conf.ouPath);
+        Logger.log('[Relay dynamic pull] start', session.id, conf.inPath, ' to ', conf.ouPath);
       }
     }
   }
 
   onDonePlay(id, streamPath, args) {
-    let session = this.dynamicSessions.get(id);
+    let sessions = this.sessionsByStream.get(id);
     let publisher = context.sessions.get(context.publishers.get(streamPath));
-    if (session && publisher.players.size == 0) {
-      session.end();
+    if (sessions && publisher.players.size == 0) {
+      for (const session of sessions.values()) {
+        session.end();
+      }
     }
   }
 
-  onPostPublish(id, streamPath, args) {
+  onPostPublish(streamId, streamPath, args) {
     if (!this.config.relay.tasks) {
       return;
     }
@@ -163,26 +159,22 @@ class NodeRelayServer {
         conf.ffmpeg = this.config.relay.ffmpeg;
         conf.inPath = `rtmp://127.0.0.1:${this.config.rtmp.port}${streamPath}`;
         conf.ouPath = conf.appendName === false ? conf.edge : (hasApp ? `${conf.edge}/${stream}` : `${conf.edge}${streamPath}`);
-        let session = new NodeRelaySession(conf);
-        session.id = id;
-        session.on('end', (id) => {
-          this.dynamicSessions.delete(id);
-        });
-        this.dynamicSessions.set(id, session);
+        const session = this.configureDynamicSession(conf, streamPath, streamId);
         session.run();
-        Logger.log('[Relay dynamic push] start', id, conf.inPath, ' to ', conf.ouPath);
+        Logger.log('[Relay dynamic push] start', session.id, conf.inPath, ' to ', conf.ouPath);
       }
     }
-
   }
 
   onDonePublish(id, streamPath, args) {
-    let session = this.dynamicSessions.get(id);
-    if (session) {
-      session.end();
+    const sessions = this.sessionsByStream.get(id);
+    if (sessions) {
+      for (const session of sessions.values()) {
+        session.end();
+      }
     }
 
-    for (session of this.staticSessions.values()) {
+    for (const session of this.staticSessions.values()) {
       if (session.streamPath === streamPath) {
         session.end();
       }
@@ -191,6 +183,34 @@ class NodeRelayServer {
 
   stop() {
     clearInterval(this.staticCycle);
+  }
+
+  configureDynamicSession(conf, streamPath, streamId) {
+    let session = new NodeRelaySession(conf, streamPath);
+    const id = session.id;
+    session.streamPath = streamPath;
+    session.streamId = streamId;
+    context.sessions.set(id, session);
+    session.on('end', (id, streamId) => {
+      this.onDynamicSessionEnd(id, streamId);
+    });
+    this.dynamicSessions.set(id, session);
+    if (streamId) {
+      if (!this.sessionsByStream.has(streamId)) {
+        this.sessionsByStream.set(streamId, new Map());
+      }
+      this.sessionsByStream.get(streamId).set(id, session);
+    }
+    return session;
+  }
+
+  onDynamicSessionEnd(id, streamId) {
+    this.dynamicSessions.delete(id);
+    context.sessions.delete(id);
+    const sessions = this.sessionsByStream.get(streamId)
+    if (sessions) {
+      sessions.delete(id);
+    }
   }
 }
 
