@@ -1022,6 +1022,7 @@ class NodeRtmpSession {
     }
 
     if (context.publishers.has(this.publishStreamPath)) {
+      this.reject();
       Logger.log(`[rtmp publish] Already has a stream. id=${this.id} streamPath=${this.publishStreamPath} streamId=${this.publishStreamId}`);
       this.sendStatusMessage(this.publishStreamId, "error", "NetStream.Publish.BadName", "Stream already publishing");
     } else if (this.isPublishing) {
@@ -1035,7 +1036,7 @@ class NodeRtmpSession {
       this.sendStatusMessage(this.publishStreamId, "status", "NetStream.Publish.Start", `${this.publishStreamPath} is now published.`);
       for (let idlePlayerId of context.idlePlayers) {
         let idlePlayer = context.sessions.get(idlePlayerId);
-        if (idlePlayer.playStreamPath === this.publishStreamPath) {
+        if (idlePlayer && idlePlayer.playStreamPath === this.publishStreamPath) {
           idlePlayer.onStartPlay();
           context.idlePlayers.delete(idlePlayerId);
         }
